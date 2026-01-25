@@ -1,0 +1,20 @@
+name: house_price_ml 
+channels:
+  - conda-forge  
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.9
+  - pandas
+  - numpy
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - lightgbm
+  - catboost
+  - pytorch
+  - torchvision
+  - jupyter
+  - pip
+  - pip:
+    - kaggle
