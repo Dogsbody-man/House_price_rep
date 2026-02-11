@@ -6,7 +6,7 @@ config = {
         'experiment_name': 'default',
         'task': 'regression', 
         'seed': 0xFACED,
-        'selected_model': 'xgboost'
+        'selected_model': 'dnn'
     },
     'paths': {
         'path_to_train_data': './data/train.csv',
@@ -15,16 +15,10 @@ config = {
         'path_to_submission': './results',
         'path_to_scaler': './scaler'
     },
-    'training': {
-        'num_epochs': 200,
-        'lr': 1e-4, 
-        'early_stopping_epochs': 10,
-    },
     'data': {
         'id_column': 'Id',
         'target_column': 'SalePrice', 
 
-        'batch_size': 4, 
         'train_batch_size': '${data.batch_size}',
         'val_batch_size': '${data.batch_size}',
 
@@ -40,11 +34,14 @@ config = {
         'val_size': 0.2,
     },
     'models': {  
-        'dnn': {
-            'nn_model': {       # Used for the DNN Training
-                'name': 'Net',
-                'params': {
-                }
+        'dnn': {    
+            'name': 'Net',
+            'params': {
+                'batch_size': 64, 
+                'num_epochs': 200,
+                'lr': 1e-5, 
+                'early_stopping_epochs': 10,
+                'device': 'mps'
             }
         },
         'classic': {

@@ -165,50 +165,49 @@ class Dataset:
 
 class DNN(nn.Module):
 
-    def __init__(self, num_epochs, device='msp', batch_size=1, learning_rate=0.1):
+    def __init__(self, config):
         super(DNN, self).__init__()
+        self.config = config
+        self.num_epochs = self.config.models.dnn.params.num_epochs
+        self.device = self.config.models.dnn.params.device
+        self.batch_size = self.config.models.dnn.params.batch_size
+        self.learning_rate = self.config.models.dnn.params.lr
+        self.early_st_epoch = self.config.models.dnn.params.early_stopping_epochs
 
-        self.num_epochs = num_epochs
-        self.device = device
-        self.batch_size = batch_size
-        self.learning_rate = learning_rate
+    def _build_model(self, X_train):
+        self.num_columns = X_train.select_dtypes(exclude=["object", "category"]).columns.tolist()
 
-    def _build_model(self):
-        
         num_numerical_categories = len(self.num_columns)
 
         input_dim = num_numerical_categories
-        if batch_size > 1:
+        if self.batch_size > 1:
             self.mlp = nn.Sequential(
                     nn.Linear(input_dim, 128),
-                    nn.BatchNorm1d(128),
-                    nn.ReLU(inplace=True),
+                    nn.LeakyReLU(inplace=True),
                     nn.Dropout(0.25),
 
                     nn.Linear(128, 64),
-                    nn.BatchNorm1d(64),
-                    nn.ReLU(inplace=True),
+                    nn.LeakyReLU(inplace=True),
 
                     nn.Linear(64, 1),
             )
+        with torch.no_grad():
+                self.mlp[-1].bias.fill_(12.0)
     
     def forward(self, x_num):
-        mlp_out = self.mlp(x_num)
-
-        return mlp_out
+        return self.mlp(x_num)
 
     def fit(self, X_train, y_train, X_val, y_val):
 
-        self.num_columns = X_train.select_dtypes(exclude=["object", "category"]).columns.tolist()
-
         ## -- Building model --
-        self._build_model()
+        self._build_model(X_train)
         self.to(self.device)
 
         X_train_num = X_train[self.num_columns]
         X_val_num = X_val[self.num_columns]
 
         train_X_tensor = torch.tensor(X_train_num.values, dtype=torch.float).to(self.device)
+
         train_y_tensor = torch.tensor(y_train.values, dtype=torch.float).to(self.device).unsqueeze(-1)
         val_X_tensor = torch.tensor(X_val_num.values, dtype=torch.float).to(self.device)
         val_y_tensor = torch.tensor(y_val.values, dtype=torch.float).to(self.device).unsqueeze(-1)
@@ -221,7 +220,7 @@ class DNN(nn.Module):
 
         optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
         criterion = nn.MSELoss()
-        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.5)
+        # lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, **self.config.scheduler.params)
         best_val_loss = float('inf')
         for epoch in range(self.num_epochs):
             print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
@@ -243,21 +242,20 @@ class DNN(nn.Module):
             
             self.eval()
             val_loss = 0
-            val_correct = 0  
-            val_total = 0
+            val_rmse = 0
+            sq_error = 0.0
+            n = 0
             with torch.no_grad():
                 for i, (X, y) in enumerate(val_loader): 
                     outputs = self.forward(X)
                     loss_value_val = criterion(outputs, y)
                     val_loss += loss_value_val.item()
 
-                    probs = torch.sigmoid(outputs)  
-                    preds = (probs > 0.5).float()
-                    val_correct += (preds == y).sum().item()
-                    val_total += y.size(0)
+                    sq_error += ((outputs - y) ** 2).sum().item()
+                    n += y.size(0)
             
             val_loss /= len(val_loader)
-            val_accuracy = val_correct / val_total if val_total > 0 else 0
+            val_rmse = np.sqrt(sq_error / n)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -266,9 +264,9 @@ class DNN(nn.Module):
             print(f"Epoch {epoch+1}/{self.num_epochs}: "
               f"Train Loss: {train_loss:.4f}, "
               f"Val Loss: {val_loss:.4f}, "
-              f"Val Acc: {val_accuracy:.4f}")
+              f"Val rmse: {val_rmse:.4f}")
 
-            lr_scheduler.step()
+            # lr_scheduler.step(val_loss)
 
         if best_model_state is not None:
             self.load_state_dict(best_model_state)
@@ -332,32 +330,42 @@ class Solver:
             X_val = val_pr.drop(columns=[self.config.data.target_column])
             y_val = np.log1p(val_pr[self.config.data.target_column])
 
+            if self.config.general.selected_model == 'dnn':
+                model = DNN(self.config)
+                model.fit(X_train, y_train, X_val, y_val)
+                with torch.no_grad():
+                    preds = model(
+                        torch.tensor(X_val.values, dtype=torch.float).to(model.device)
+                    ).cpu().numpy().ravel()
 
-            cat_features = [
-                X_train.columns.get_loc(col)
-                for col in dataset.cat_features
-                if col in X_train.columns
-            ]
-
-            model = self._build_model_()
-            if isinstance(model, CatBoostRegressor):
-                model.fit(
-                    X_train,
-                    y_train,
-                    cat_features=cat_features,
-                    verbose=False
-                )
+                rmse = np.sqrt(mean_squared_error(y_val, preds))
+                scores.append(rmse)
             else:
-                model.fit(X_train, y_train)
-            preds = model.predict(X_val)
+                cat_features = [
+                    X_train.columns.get_loc(col)
+                    for col in dataset.cat_features
+                    if col in X_train.columns
+                ]
 
-            rmse = np.sqrt(mean_squared_error(y_val, preds))
-            scores.append(rmse)
+                model = self._build_model_()
+                if isinstance(model, CatBoostRegressor):
+                    model.fit(
+                        X_train,
+                        y_train,
+                        cat_features=cat_features,
+                        verbose=False
+                    )
+                else:
+                    model.fit(X_train, y_train)
+                preds = model.predict(X_val)
 
-            print(f"Fold {fold}: RMSE = {rmse:.5f}")
+                rmse = np.sqrt(mean_squared_error(y_val, preds))
+                scores.append(rmse)
 
-        mean_score = np.mean(scores)
-        print(f"CV mean RMSE: {mean_score:.5f}")
+                print(f"Fold {fold}: RMSE = {rmse:.5f}")
+
+            mean_score = np.mean(scores)
+            print(f"CV mean RMSE: {mean_score:.5f}")
 
         return mean_score
 
@@ -376,6 +384,10 @@ class Solver:
             ]
             self.model = self._build_model_()
             self.model.fit(X, y, cat_features=cat_features)
+        elif self.config.general.selected_model == 'dnn':
+            trainx, trainy, valx, valy = train_test_split(X, y, test_size=0.1, random_state=self.config)
+            self.model = DNN(self.config)
+            self.model.fit(trainx, trainy, valx, valy)
         else:
             self.model = self._build_model_()
             self.model.fit(X.to_numpy(), y.to_numpy())
@@ -384,6 +396,9 @@ class Solver:
 
         if self.config.general.selected_model.startswith("catboost"):
             return self.model.predict(df)
+        elif self.config.general.selected_model == 'dnn':
+            with torch.no_grad():
+                return self.model(torch.tensor(df.values, dtype=torch.float).to(self.model.device)).numpy()
         else:
             return self.model.predict(df.to_numpy())
 
